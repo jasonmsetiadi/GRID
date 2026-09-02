@@ -10,7 +10,7 @@ id: ${now:%Y-%m-%d}/${now:%H-%M-%S}
 tags:
 - amazon-assign-ids-train
 train: true
-test: false
+test: true
 ckpt_path: null
 seed: 42
 data_loading:
@@ -66,7 +66,7 @@ data_loading:
       data_folder: ${paths.data_dir}/items
       should_shuffle_rows: true
       batch_size_per_device: 2048
-      num_workers: 12
+      num_workers: 2
       assign_files_by_size: false
       timeout: 60
       drop_last: false
@@ -229,6 +229,8 @@ extras:
   print_config: true
 optim:
   optimizer:
+    _target_: torch.optim.Adagrad
+    _partial_: true
     lr: 0.001
 eval:
   evaluator:

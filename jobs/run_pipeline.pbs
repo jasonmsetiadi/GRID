@@ -1,0 +1,15 @@
+#!/bin/bash
+
+#PBS -l select=1:ncpus=1:mem=8gb:ngpus=1:gpu_model=A100
+#PBS -l walltime=12:00:00
+#PBS -M jason.setiadi@unsw.edu.au
+#PBS -m ae
+#PBS -j oe
+
+cd $PBS_O_WORKDIR
+
+# Create directory if it doesn't exist
+mkdir -p $HF_HOME
+
+# DATASET and SID_METHOD are passed via qsub -v DATASET=...,SID_METHOD=...
+bash run_full_pipeline.sh

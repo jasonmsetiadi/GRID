@@ -249,7 +249,7 @@ callbacks:
     save_last: null
     save_top_k: 1
     mode: max
-    auto_insert_metric_name: true
+    auto_insert_metric_name: false
     save_weights_only: false
     every_n_train_steps: null
     train_time_interval: null
