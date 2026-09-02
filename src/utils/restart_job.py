@@ -188,6 +188,7 @@ class BaseJobLauncher:
             self.logger.info("Creating temporary metadata dir.")
             self.metadata_dir = tempfile.mkdtemp(prefix=f"job_launcher_{os.getpid()}_")
 
+        os.makedirs(self.metadata_dir, exist_ok=True)
         os.environ["METADATA_DIR"] = self.metadata_dir
         self.cfg.paths.metadata_dir = self.metadata_dir
         self.metadata_path = os.path.join(self.metadata_dir, "restart_metadata.json")
