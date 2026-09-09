@@ -603,8 +603,13 @@ class ResidualQuantization(LightningModule):
         (
             cluster_ids,
             all_residuals,
-            loss,
+            quantization_loss,
+            reconstruction_loss,
         ) = self.model_step(batch)
+        loss = (
+            self.quantization_loss_weight * quantization_loss
+            + self.reconstruction_loss_weight * reconstruction_loss
+        )
         loss_to_aggregate(loss)
 
         (
