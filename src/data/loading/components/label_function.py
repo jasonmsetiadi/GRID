@@ -194,3 +194,82 @@ class NextKTokenMasking(LabelFunction):
             labels=labels,
             label_location=label_location,
         )
+
+
+class NextItemTokenMasking(NextKTokenMasking):
+    """Mask the final item, using separators for variable-length IDs."""
+
+    def __init__(
+        self,
+        next_k: int,
+        separator_token: Optional[int] = None,
+        semantic_id_mode: str = "fixed",
+    ):
+        super().__init__(next_k=next_k)
+        self.separator_token = separator_token
+        self.semantic_id_mode = semantic_id_mode
+
+    def transform_label(
+        self, sequence: torch.Tensor, padding_token: int, masking_token: int
+    ) -> LabelFunctionOutput:
+        if self.separator_token is None:
+            return super().transform_label(
+                sequence=sequence,
+                padding_token=padding_token,
+                masking_token=masking_token,
+            )
+
+        if self.semantic_id_mode == "fixed":
+            targets = []
+            target_locations = []
+            transformed = sequence.clone()
+            for row_index, row in enumerate(sequence):
+                separator_positions = torch.where(row == self.separator_token)[0]
+                if separator_positions.numel() == 0:
+                    raise ValueError("Semantic-ID sequences require separators.")
+                final_separator = int(separator_positions[-1])
+                start = final_separator - self.next_k
+                target = row[start:final_separator]
+                targets.append(target)
+                target_locations.append((row_index, start))
+                transformed[row_index, start] = masking_token
+                if final_separator > start + 1:
+                    transformed[row_index, start + 1 : final_separator] = padding_token
+            labels = torch.stack(targets)
+            return LabelFunctionOutput(
+                sequence=transformed,
+                labels=labels,
+                label_location=torch.tensor(target_locations, device=sequence.device),
+            )
+
+        targets = []
+        target_locations = []
+        transformed = sequence.clone()
+        for row_index, row in enumerate(sequence):
+            separator_positions = torch.where(row == self.separator_token)[0]
+            if separator_positions.numel() == 0:
+                raise ValueError("Variable-length semantic-ID sequences require separators.")
+            final_separator = int(separator_positions[-1])
+            previous_separator = (
+                int(separator_positions[-2]) if separator_positions.numel() > 1 else -1
+            )
+            start = previous_separator + 1
+            target = row[start : final_separator + 1]
+            targets.append(target)
+            target_locations.append((row_index, start))
+            transformed[row_index, start] = masking_token
+            if final_separator > start:
+                transformed[row_index, start + 1 : final_separator + 1] = padding_token
+
+        max_target_length = max(target.numel() for target in targets)
+        labels = torch.full(
+            (len(targets), max_target_length), padding_token, dtype=sequence.dtype
+        )
+        for row_index, target in enumerate(targets):
+            labels[row_index, : target.numel()] = target
+
+        return LabelFunctionOutput(
+            sequence=transformed,
+            labels=labels,
+            label_location=torch.tensor(target_locations, device=sequence.device),
+        )

@@ -77,7 +77,7 @@ def merge_list_of_keyed_tensors_to_single_tensor(
     data: list[dict[str, torch.Tensor]],
     index_key: str,
     value_key: str,
-) -> torch.Tensor:
+) -> Union[torch.Tensor, dict[str, torch.Tensor]]:
     """
     Converts a list of dictionaries of id to tensors into a single tensor by squeezing
     the tensors along the specified index key.
@@ -108,13 +108,43 @@ def merge_list_of_keyed_tensors_to_single_tensor(
         value_key (str): The key in the dictionary that contains the tensor to be merged.
     """
     batch_size = len(data)
-    dimensions = torch.tensor(data[0][value_key]).size()
+    is_ragged = any(row.get("_ragged", False) for row in data)
+    values = [torch.as_tensor(row[value_key]) for row in data]
+
+    # Ragged semantic IDs cannot be represented by a regular dense tensor.
+    # Preserve their item alignment explicitly while keeping the fixed-length
+    # tensor format unchanged.
+    if is_ragged or len({tuple(value.shape) for value in values}) > 1:
+        max_length = max(value.numel() for value in values)
+        item_ids = torch.as_tensor([row[index_key] for row in data], dtype=torch.long)
+        output_size = int(item_ids.max().item()) + 1
+        semantic_ids = torch.full(
+            (output_size, max_length + 1), -1, dtype=values[0].dtype
+        )
+        lengths = torch.zeros(output_size, dtype=torch.long)
+        duplicate_counts = {}
+        for item_id, value in zip(item_ids.tolist(), values):
+            value = value.reshape(-1)
+            key = tuple(value.tolist())
+            duplicate_counts[key] = duplicate_counts.get(key, 0) + 1
+            collision_id = duplicate_counts[key] - 1
+            semantic_ids[item_id, : value.numel()] = value
+            semantic_ids[item_id, value.numel()] = collision_id
+            lengths[item_id] = value.numel() + 1
+        return {
+            "item_ids": torch.arange(output_size, dtype=torch.long),
+            "semantic_ids": semantic_ids,
+            "lengths": lengths,
+            "padding_token": torch.tensor(-1),
+        }
+
+    dimensions = values[0].size()
     output_tensor = torch.zeros((batch_size, *dimensions))
     for row in data:
         index = row[index_key]
         value = row[value_key]
         if index < batch_size:
-            output_tensor[index] = torch.tensor(value)
+            output_tensor[index] = torch.as_tensor(value)
         else:
             raise IndexError(
                 f"Index {index} out of bounds for batch size {batch_size}."
@@ -141,6 +171,11 @@ def deduplicate_rows_in_tensor(
     if not file_path.endswith(".pt"):
         return None
     data = torch.load(open_local_or_remote(file_path, mode="rb"))
+
+    if isinstance(data, dict):
+        # Variable-length semantic-ID artifacts already carry explicit lengths;
+        # duplicate-row augmentation is only defined for dense legacy tensors.
+        return None
     assert len(data.size()) == 2, "Input data must be a 2D PyTorch tensor."
 
     # Use torch.unique to get unique rows and their inverse indices
@@ -196,6 +231,9 @@ def transpose_tensor_from_file(
     if not file_path.endswith(".pt"):
         return None
     data = torch.load(open_local_or_remote(file_path, mode="rb"))
+
+    if isinstance(data, dict):
+        return None
 
     # Transpose the tensor
     result = data.transpose(dim1, dim2)

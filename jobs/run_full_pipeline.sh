@@ -17,11 +17,20 @@ cd GRID
 # Defaults are provided for local/manual runs.
 DATASET=${DATASET:-beauty}
 SID_METHOD=${SID_METHOD:-rkmeans}       # options: rkmeans, rvq, rqvae
+SEMANTIC_ID_MODE=${SEMANTIC_ID_MODE:-fixed} # options: fixed, variable
+RESIDUAL_THRESHOLD=${RESIDUAL_THRESHOLD:-0.05}
+MIN_HIERARCHIES=${MIN_HIERARCHIES:-1}
 
 EMBEDDING_DIM=2048
 SID_HIERARCHIES=3
-TIGER_HIERARCHIES=4
 CODEBOOK_WIDTH=256
+SEPARATOR_TOKEN=256
+
+if [[ "${SEMANTIC_ID_MODE}" == "variable" ]]; then
+    SID_HIERARCHIES=10
+fi
+
+TIGER_HIERARCHIES=$((SID_HIERARCHIES + 1))
 
 # Helper to print elapsed time in HH:MM:SS given a start timestamp (seconds since epoch).
 log_duration() {
@@ -61,6 +70,9 @@ python -m src.train experiment=${SID_METHOD}_train_flat \
     embedding_dim=${EMBEDDING_DIM} \
     num_hierarchies=${SID_HIERARCHIES} \
     codebook_width=${CODEBOOK_WIDTH} \
+    semantic_id_mode=${SEMANTIC_ID_MODE} \
+    residual_threshold=${RESIDUAL_THRESHOLD} \
+    min_hierarchies=${MIN_HIERARCHIES} \
     paths.log_dir=logs/${DATASET}/${SID_METHOD}
 
 # Locate the latest checkpoint from Step 3a under this method's log dir.
@@ -78,6 +90,9 @@ python -m src.inference experiment=${SID_METHOD}_inference_flat \
     num_hierarchies=${SID_HIERARCHIES} \
     codebook_width=${CODEBOOK_WIDTH} \
     ckpt_path=${SID_CKPT} \
+    semantic_id_mode=${SEMANTIC_ID_MODE} \
+    residual_threshold=${RESIDUAL_THRESHOLD} \
+    min_hierarchies=${MIN_HIERARCHIES} \
     paths.log_dir=logs/${DATASET}/${SID_METHOD}
 
 # Locate the latest generated semantic IDs from Step 3b under this method's log dir.
@@ -94,6 +109,9 @@ python -m src.train experiment=tiger_train_flat \
     data_dir=data/amazon_data/${DATASET} \
     semantic_id_path=${SEMANTIC_ID_PATH} \
     num_hierarchies=${TIGER_HIERARCHIES} \
+    semantic_id_mode=${SEMANTIC_ID_MODE} \
+    separator_token=${SEPARATOR_TOKEN} \
+    min_hierarchies=${MIN_HIERARCHIES} \
     paths.log_dir=logs/${DATASET}/${SID_METHOD}
 
 # Locate the latest checkpoint from Step 4 under this method's log dir.
@@ -111,6 +129,9 @@ python -m src.inference experiment=tiger_inference_flat \
     semantic_id_path=${SEMANTIC_ID_PATH} \
     ckpt_path=${TIGER_CKPT} \
     num_hierarchies=${TIGER_HIERARCHIES} \
+    semantic_id_mode=${SEMANTIC_ID_MODE} \
+    separator_token=${SEPARATOR_TOKEN} \
+    min_hierarchies=${MIN_HIERARCHIES} \
     paths.log_dir=logs/${DATASET}/${SID_METHOD}
 
 # Locate the latest recommendation output under this method's log dir.

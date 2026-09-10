@@ -4,6 +4,9 @@ embedding_path: ???
 embedding_dim: ???
 num_hierarchies: ???
 codebook_width: ??? 
+semantic_id_mode: fixed
+residual_threshold: 0.05
+min_hierarchies: 1
 
 task_name: train
 id: ${now:%Y-%m-%d}/${now:%H-%M-%S}
@@ -136,6 +139,9 @@ data_loading:
       limit_files: null
 model:
   _target_: src.modules.clustering.residual_quantization.ResidualQuantization
+  semantic_id_mode: ${semantic_id_mode}
+  residual_threshold: ${residual_threshold}
+  min_hierarchies: ${min_hierarchies}
   track_residuals: true
   verbose: true
   train_layer_wise: true

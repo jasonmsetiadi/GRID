@@ -34,6 +34,9 @@ class ResidualQuantization(LightningModule):
         train_layer_wise: bool = False,
         track_residuals: bool = False,
         verbose: bool = False,
+        semantic_id_mode: str = "fixed",
+        residual_threshold: float = 0.0,
+        min_hierarchies: int = 1,
         **kwargs,
     ) -> None:
         """
@@ -57,6 +60,9 @@ class ResidualQuantization(LightningModule):
                 will be trained for the same, plus or minus one, number of steps.
             track_residuals: Whether to track residuals at each layer.
             verbose: Whether to log progress during training.
+            semantic_id_mode: Whether to emit fixed- or variable-length semantic IDs.
+            residual_threshold: Stop the semantic ID after the residual norm reaches this value.
+            min_hierarchies: Minimum number of layers retained in variable mode.
         """
         super().__init__()
         self.save_hyperparameters(
@@ -97,6 +103,16 @@ class ResidualQuantization(LightningModule):
             self.automatic_optimization = False
         self.train_layer_wise = train_layer_wise
         self.normalize_residuals = normalize_residuals
+        if semantic_id_mode not in {"fixed", "variable"}:
+            raise ValueError("semantic_id_mode must be either 'fixed' or 'variable'.")
+        if semantic_id_mode == "variable":
+            if residual_threshold < 0:
+                raise ValueError("residual_threshold must be non-negative.")
+            if not 1 <= min_hierarchies <= self.n_layers:
+                raise ValueError("min_hierarchies must be between 1 and n_layers.")
+        self.semantic_id_mode = semantic_id_mode
+        self.residual_threshold = residual_threshold
+        self.min_hierarchies = min_hierarchies
 
         self.quantization_loss_weight = quantization_loss_weight
         self.reconstruction_loss_function = reconstruction_loss_function
@@ -202,10 +218,14 @@ class ResidualQuantization(LightningModule):
             quantization_loss: The total quantization loss value, summed across layers.
         """
         cluster_ids = []
+        residual_norms = []
         current_residuals = embeddings
         all_residuals = [] if self.track_residuals else None
         quantized_embeddings = torch.zeros_like(embeddings)
         quantization_loss = torch.tensor(0.0).to(self.device)
+        active_items = torch.ones(
+            embeddings.size(0), dtype=torch.bool, device=embeddings.device
+        )
 
         for idx, layer in enumerate(self.quantization_layer_list):
             if self.normalize_residuals:
@@ -253,17 +273,40 @@ class ResidualQuantization(LightningModule):
             else:
                 layer_ids, layer_embeddings = layer.predict_step(current_residuals)
 
+            if self.semantic_id_mode == "variable":
+                layer_embeddings = layer_embeddings * active_items.unsqueeze(-1)
             cluster_ids.append(layer_ids)  # batch_size
             quantized_embeddings = quantized_embeddings + layer_embeddings
             current_residuals = current_residuals - layer_embeddings
+            if self.semantic_id_mode == "variable":
+                current_norms = torch.linalg.vector_norm(current_residuals, dim=-1)
+                residual_norms.append(current_norms)
+                if idx + 1 >= self.min_hierarchies:
+                    active_items &= current_norms > self.residual_threshold
             if self.track_residuals:
                 all_residuals.append(current_residuals)
 
         cluster_ids = torch.stack(cluster_ids, dim=-1)  # batch_size x n_layers
+        if self.semantic_id_mode == "variable":
+            residual_norms = torch.stack(residual_norms, dim=-1)
+            valid_layers = residual_norms > self.residual_threshold
+            valid_layers = valid_layers.cumprod(dim=-1).bool()
+            valid_layers[:, : self.min_hierarchies] = True
+            lengths = valid_layers.sum(dim=-1)
+            cluster_ids = cluster_ids.masked_fill(~valid_layers, 0)
         all_residuals = (
             torch.stack(all_residuals, dim=-1) if self.track_residuals else None
         )
 
+        if self.semantic_id_mode == "variable":
+            return (
+                cluster_ids,
+                valid_layers,
+                lengths,
+                all_residuals,
+                quantized_embeddings,
+                quantization_loss,
+            )
         return cluster_ids, all_residuals, quantized_embeddings, quantization_loss
 
     def model_step(
@@ -289,12 +332,23 @@ class ResidualQuantization(LightningModule):
         )
         normalized_input_embeddings = self.normalization_layer(input_embeddings)
         encoded_embeddings = self.encoder(normalized_input_embeddings)
-        (
-            cluster_ids,
-            all_residuals,
-            quantized_embeddings,
-            quantization_loss,
-        ) = self.forward(encoded_embeddings)
+        forward_output = self.forward(encoded_embeddings)
+        if self.semantic_id_mode == "variable":
+            (
+                cluster_ids,
+                validity_mask,
+                lengths,
+                all_residuals,
+                quantized_embeddings,
+                quantization_loss,
+            ) = forward_output
+        else:
+            (
+                cluster_ids,
+                all_residuals,
+                quantized_embeddings,
+                quantization_loss,
+            ) = forward_output
 
         if (
             self.trainer.state.fn != TrainerFn.PREDICTING
@@ -309,12 +363,16 @@ class ResidualQuantization(LightningModule):
         else:
             reconstruction_loss = torch.tensor(0.0).to(self.device)
 
-        return (
-            cluster_ids,
-            all_residuals,
-            quantization_loss,
-            reconstruction_loss,
-        )
+        if self.semantic_id_mode == "variable":
+            return (
+                cluster_ids,
+                validity_mask,
+                lengths,
+                all_residuals,
+                quantization_loss,
+                reconstruction_loss,
+            )
+        return cluster_ids, all_residuals, quantization_loss, reconstruction_loss
 
     def training_step(self, batch: Tuple[ItemData]) -> torch.Tensor:
         """
@@ -329,12 +387,23 @@ class ResidualQuantization(LightningModule):
         # Lightning wraps the batch in a tuple for training, we get the batch from
         # position 0. This behavior only happens for training_step.
         model_input: ItemData = batch[0]
-        (
-            cluster_ids,
-            all_residuals,
-            quantization_loss,
-            reconstruction_loss,
-        ) = self.model_step(model_input)
+        model_output = self.model_step(model_input)
+        if self.semantic_id_mode == "variable":
+            (
+                cluster_ids,
+                _validity_mask,
+                _lengths,
+                all_residuals,
+                quantization_loss,
+                reconstruction_loss,
+            ) = model_output
+        else:
+            (
+                cluster_ids,
+                all_residuals,
+                quantization_loss,
+                reconstruction_loss,
+            ) = model_output
 
         loss = (
             self.quantization_loss_weight * quantization_loss
@@ -600,12 +669,23 @@ class ResidualQuantization(LightningModule):
             frac_unique_ids_metric: The metric for the fraction of unique ids.
             mse_metric: The metric for the mean squared error.
         """
-        (
-            cluster_ids,
-            all_residuals,
-            quantization_loss,
-            reconstruction_loss,
-        ) = self.model_step(batch)
+        model_output = self.model_step(batch)
+        if self.semantic_id_mode == "variable":
+            (
+                cluster_ids,
+                _validity_mask,
+                _lengths,
+                all_residuals,
+                quantization_loss,
+                reconstruction_loss,
+            ) = model_output
+        else:
+            (
+                cluster_ids,
+                all_residuals,
+                quantization_loss,
+                reconstruction_loss,
+            ) = model_output
         loss = (
             self.quantization_loss_weight * quantization_loss
             + self.reconstruction_loss_weight * reconstruction_loss
@@ -727,18 +807,31 @@ class ResidualQuantization(LightningModule):
             model_output: A OneKeyPerPredictionOutput object containing the item
                 ids as keys and the cluster ids as predictions.
         """
-        cluster_ids, _, _, _ = self.model_step(batch)
+        model_output = self.model_step(batch)
+        if self.semantic_id_mode == "variable":
+            cluster_ids, _validity_mask, lengths, _, _, _ = model_output
+        else:
+            cluster_ids, _, _, _ = model_output
 
         item_ids = [
             item_id.item() if isinstance(item_id, torch.Tensor) else item_id
             for item_id in batch.item_ids
         ]
 
+        if self.semantic_id_mode == "variable":
+            predictions = [
+                item_ids_tensor[:length].tolist()
+                for item_ids_tensor, length in zip(cluster_ids, lengths.tolist())
+            ]
+        else:
+            predictions = cluster_ids
+
         model_output = OneKeyPerPredictionOutput(
             keys=item_ids,
-            predictions=cluster_ids,
+            predictions=predictions,
             key_name="item_id",
             prediction_name="cluster_ids",
+            ragged=self.semantic_id_mode == "variable",
         )
         return model_output
 

@@ -40,6 +40,10 @@ class SemanticIDGenerativeRecommender(TransformerBaseModule):
         embedding_dim: int,
         should_check_prefix: bool,
         top_k_for_generation: int,
+        separator_token: Optional[int] = None,
+        padding_token: int = -1,
+        semantic_id_mode: str = "fixed",
+        min_hierarchies: int = 1,
         **kwargs,
     ) -> None:
         """
@@ -60,6 +64,8 @@ class SemanticIDGenerativeRecommender(TransformerBaseModule):
         self.embedding_dim = embedding_dim
         self.num_hierarchies = num_hierarchies
         self.should_check_prefix = should_check_prefix
+        if isinstance(codebooks, dict):
+            codebooks = codebooks["semantic_ids"]
         if codebooks != None:
             self.codebooks = codebooks.t()
             assert (
@@ -75,6 +81,10 @@ class SemanticIDGenerativeRecommender(TransformerBaseModule):
             )
 
         self.top_k_for_generation = top_k_for_generation
+        self.separator_token = separator_token
+        self.padding_token = padding_token
+        self.semantic_id_mode = semantic_id_mode
+        self.min_hierarchies = min_hierarchies
 
     def _inject_sep_token_between_sids(
         self,
@@ -165,6 +175,8 @@ class SemanticIDGenerativeRecommender(TransformerBaseModule):
         codebook_size: int,
         num_hierarchies: int,
         attention_mask: Optional[torch.Tensor] = None,
+        separator_token: Optional[int] = None,
+        padding_token: int = -1,
     ):
         """Adds repeating offsets to each element in each row of input_sids.
         we use a single embedding table for multiple code books.
@@ -181,6 +193,27 @@ class SemanticIDGenerativeRecommender(TransformerBaseModule):
             raise ValueError("Input tensor must be 2-dimensional.")
 
         num_rows, num_cols = input_sids.shape
+        if separator_token is not None:
+            separator_embedding = codebook_size * num_hierarchies
+            shifted = torch.full_like(input_sids, separator_embedding)
+            for row_idx in range(num_rows):
+                hierarchy = 0
+                for col_idx in range(num_cols):
+                    token = input_sids[row_idx, col_idx]
+                    if token == separator_token:
+                        hierarchy = 0
+                    elif token == padding_token:
+                        continue
+                    else:
+                        shifted[row_idx, col_idx] = token + hierarchy * codebook_size
+                        hierarchy = min(hierarchy + 1, num_hierarchies - 1)
+            if attention_mask is not None:
+                shifted = torch.where(
+                    attention_mask.bool(),
+                    shifted,
+                    shifted.new_full((), separator_embedding),
+                )
+            return shifted
         offsets = (
             torch.arange(num_hierarchies, device=input_sids.device) * codebook_size
         )
@@ -475,6 +508,10 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
         mlp_layers: Optional[int] = None,
         should_check_prefix: bool = False,
         should_add_sep_token: bool = True,
+        separator_token: Optional[int] = None,
+        padding_token: int = -1,
+        semantic_id_mode: str = "fixed",
+        min_hierarchies: int = 1,
         prediction_key_name: str = "user_id",
         prediction_value_name: str = "semantic_ids",
         **kwargs,
@@ -493,6 +530,8 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
         should_check_prefix (bool): whether to check if the prefix is valid.
         """
 
+        if isinstance(codebooks, dict):
+            codebooks = codebooks["semantic_ids"]
         if num_hierarchies is None or num_embeddings_per_hierarchy is None:
             num_hierarchies, num_embeddings_per_hierarchy = (
                 codebooks.shape[0],
@@ -513,6 +552,10 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
             embedding_dim=embedding_dim,
             top_k_for_generation=top_k_for_generation,
             should_check_prefix=should_check_prefix,
+            separator_token=separator_token,
+            padding_token=padding_token,
+            semantic_id_mode=semantic_id_mode,
+            min_hierarchies=min_hierarchies,
             **kwargs,
         )
 
@@ -532,7 +575,8 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
                 [
                     torch.nn.Linear(
                         self.embedding_dim,
-                        self.num_embeddings_per_hierarchy,
+                        self.num_embeddings_per_hierarchy
+                        + (1 if semantic_id_mode == "variable" else 0),
                         bias=False,
                     )
                     for _ in range(self.num_hierarchies)
@@ -557,7 +601,8 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
         # generate embedding tables for each hierarchy
         # here we assume each hierarchy has the same amount of embeddings
         self.item_sid_embedding_table_encoder = self._spawn_embedding_tables(
-            num_embeddings=self.num_embeddings_per_hierarchy * self.num_hierarchies,
+            num_embeddings=self.num_embeddings_per_hierarchy * self.num_hierarchies
+            + (1 if separator_token is not None else 0),
             embedding_dim=self.embedding_dim,
         )
 
@@ -603,12 +648,14 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
             codebook_size=self.num_embeddings_per_hierarchy,
             num_hierarchies=self.num_hierarchies,
             attention_mask=attention_mask,
+            separator_token=self.separator_token,
+            padding_token=self.padding_token,
         )
         inputs_embeds_for_encoder = self.get_embedding_table(table_name="encoder")(
             shifted_sids
         )
 
-        if self.sep_token is not None:
+        if self.sep_token is not None and self.separator_token is None:
             (
                 inputs_embeds_for_encoder,
                 attention_mask,
@@ -689,6 +736,8 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
                 attention_mask=torch.ones_like(future_ids, device=future_ids.device)
                 if attention_mask is None
                 else attention_mask,
+                separator_token=self.separator_token,
+                padding_token=self.padding_token,
             )
             inputs_embeds_for_decoder = self.get_embedding_table(table_name="decoder")(
                 shifted_future_sids
@@ -748,6 +797,13 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
             input_ids (torch.Tensor): The input IDs for the encoder.
             user_id (torch.Tensor): The user IDs for the encoder.
         """
+
+        if self.semantic_id_mode == "variable":
+            return self._generate_variable(
+                attention_mask=attention_mask,
+                input_ids=input_ids,
+                user_id=user_id,
+            )
 
         # getting encoder output
         # we only need to do this once because we have decoder
@@ -826,6 +882,62 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
 
         return generated_ids, marginal_log_prob
 
+    def _generate_variable(
+        self,
+        attention_mask: torch.Tensor,
+        input_ids: torch.Tensor,
+        user_id: torch.Tensor = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Generate one separator-terminated semantic ID per input row.
+
+        Variable-length generation uses the same decoder as fixed mode, but
+        permits the separator at each valid hierarchy position and pads rows
+        after they finish. The output keeps a candidate dimension for the
+        existing prediction-writer interface.
+        """
+        encoder_output, encoder_attention_mask = self.encoder_forward_pass(
+            attention_mask=attention_mask,
+            input_ids=input_ids,
+            user_id=user_id,
+        )
+        batch_size = input_ids.size(0)
+        separator_index = self.num_embeddings_per_hierarchy
+        generated_ids = input_ids.new_empty((batch_size, 0))
+        active = torch.ones(batch_size, dtype=torch.bool, device=input_ids.device)
+        probabilities = []
+
+        for hierarchy in range(self.num_hierarchies):
+            if generated_ids.size(1) == 0:
+                decoder_output = self.decoder_forward_pass(
+                    encoder_output=encoder_output,
+                    attention_mask_for_encoder=encoder_attention_mask,
+                    use_cache=False,
+                )
+            else:
+                decoder_output = self.decoder_forward_pass(
+                    future_ids=generated_ids,
+                    attention_mask=(generated_ids != self.padding_token).long(),
+                    encoder_output=encoder_output,
+                    attention_mask_for_encoder=encoder_attention_mask,
+                    use_cache=False,
+                )
+            logits = self.decoder.decoder_mlp[hierarchy](decoder_output[:, -1, :])
+
+            # The separator is only valid after the minimum length and is
+            # mandatory at the maximum length.
+            if hierarchy + 1 < self.min_hierarchies:
+                logits[:, separator_index] = float("-inf")
+            if hierarchy + 1 >= self.num_hierarchies:
+                logits[:, :separator_index] = float("-inf")
+            logits[~active] = float("-inf")
+            choices = torch.argmax(logits, dim=-1)
+            choices[~active] = self.padding_token
+            probabilities.append(torch.softmax(logits, dim=-1).amax(dim=-1))
+            generated_ids = torch.cat([generated_ids, choices.unsqueeze(1)], dim=1)
+            active &= choices != separator_index
+
+        return generated_ids.unsqueeze(1), torch.stack(probabilities, dim=1).unsqueeze(1)
+
     def forward(
         self,
         attention_mask_encoder: torch.Tensor,
@@ -889,11 +1001,21 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
             id.item() if isinstance(id, torch.Tensor) else id
             for id in batch.user_id_list
         ]
+        if self.semantic_id_mode == "variable":
+            predictions = [
+                candidate[
+                    (candidate >= 0) & (candidate != self.separator_token)
+                ].tolist()
+                for candidate in generated_sids[:, 0]
+            ]
+        else:
+            predictions = generated_sids
         model_output = OneKeyPerPredictionOutput(
             keys=ids,
-            predictions=generated_sids,
+            predictions=predictions,
             key_name=self.prediction_key_name,
             prediction_name=self.prediction_value_name,
+            ragged=self.semantic_id_mode == "variable",
         )
         return model_output
 
@@ -931,6 +1053,9 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
         model_output = self.forward(
             attention_mask_encoder=model_input.mask,
             future_ids=fut_ids,
+            attention_mask_decoder=(fut_ids != self.padding_token).long()
+            if self.semantic_id_mode == "variable"
+            else None,
             **{
                 self.feature_to_model_input_map.get(k, k): v
                 for k, v in model_input.transformed_sequences.items()
@@ -940,6 +1065,19 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
         # we prepended a bos token to the decoder input
         # so we need to remove the last token in the output
         model_output = model_output[:, :-1]
+
+        if self.semantic_id_mode == "variable":
+            logits = []
+            for position in range(fut_ids.size(1)):
+                hierarchy = min(position, self.num_hierarchies - 1)
+                logits.append(self.decoder.decoder_mlp[hierarchy](model_output[:, position]))
+            logits = torch.stack(logits, dim=1)
+            loss = torch.nn.functional.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                fut_ids.long().reshape(-1),
+                ignore_index=self.padding_token,
+            )
+            return model_output, loss
 
         # the label locations is shared for all semantic id hierarchies
         loss = 0

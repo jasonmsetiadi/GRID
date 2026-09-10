@@ -76,18 +76,21 @@ class OneKeyPerPredictionOutput(ModelOutput):
         predictions,
         key_name: str = "idx",
         prediction_name: str = "prediction",
+        ragged: bool = False,
     ):
         self.keys = keys
         self.predictions = predictions
         self.key_name = key_name
         self.prediction_name = prediction_name
+        self.ragged = ragged
 
     @property
     def list_of_row_format(self):
-        return [
-            {self.key_name: key, self.prediction_name: pred}
+        rows = [
+            {self.key_name: key, self.prediction_name: pred, "_ragged": self.ragged}
             for key, pred in zip(
                 self._convert_to_list(self.keys),
                 self._convert_to_list(self.predictions),
             )
         ]
+        return rows

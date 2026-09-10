@@ -3,6 +3,10 @@ data_dir: ???
 semantic_id_path: ???
 num_hierarchies: ???
 sequence_length: 120
+semantic_id_mode: fixed
+separator_token: 256
+padding_token: -1
+min_hierarchies: 1
 
 task_name: train
 id: ${now:%Y-%m-%d}/${now:%H-%M-%S}
@@ -66,6 +70,8 @@ data_loading:
         features_to_apply:
         - sequence_data
         num_hierarchies: ${model.num_hierarchies}
+        semantic_id_mode: ${semantic_id_mode}
+        separator_token: ${separator_token}
   train_dataloader_config:
     dataloader:
       _target_: src.data.loading.components.interfaces.SequenceDataloaderConfig
@@ -77,8 +83,9 @@ data_loading:
       labels:
         sequence_data:
           transform:
-            _target_: src.data.loading.components.label_function.NextKTokenMasking
+            _target_: src.data.loading.components.label_function.NextItemTokenMasking
             next_k: ${model.num_hierarchies}
+            separator_token: ${separator_token}
       batch_size_per_device: 32
       num_workers: 8
       timeout: 60
@@ -92,6 +99,7 @@ data_loading:
       collate_fn:
         _target_: src.data.loading.components.collate_functions.collate_with_sid_causal_duplicate
         _partial_: true
+        separator_token: ${separator_token}
         sequence_length: ${data_loading.train_dataloader_config.dataloader.sequence_length}
         padding_token: ${data_loading.train_dataloader_config.dataloader.padding_token}
         sequence_field_name: sequence_data
@@ -128,6 +136,8 @@ data_loading:
           features_to_apply:
           - sequence_data
           num_hierarchies: ${model.num_hierarchies}
+          semantic_id_mode: ${semantic_id_mode}
+          separator_token: ${separator_token}
       assign_all_files_per_worker: true
   val_dataloader_config:
     dataloader:
@@ -140,8 +150,9 @@ data_loading:
       labels:
         sequence_data:
           transform:
-            _target_: src.data.loading.components.label_function.NextKTokenMasking
+            _target_: src.data.loading.components.label_function.NextItemTokenMasking
             next_k: ${model.num_hierarchies}
+            separator_token: ${separator_token}
       batch_size_per_device: 8
       num_workers: 8
       timeout: 60
@@ -170,8 +181,9 @@ data_loading:
       labels:
         sequence_data:
           transform:
-            _target_: src.data.loading.components.label_function.NextKTokenMasking
+            _target_: src.data.loading.components.label_function.NextItemTokenMasking
             next_k: ${model.num_hierarchies}
+            separator_token: ${separator_token}
       batch_size_per_device: 8
       num_workers: 8
       timeout: 60
@@ -207,6 +219,10 @@ model:
       d_kv: 64
       num_layers: 4
   _target_: src.models.modules.semantic_id.tiger_generation_model.SemanticIDEncoderDecoder
+  semantic_id_mode: ${semantic_id_mode}
+  separator_token: ${separator_token}
+  padding_token: ${padding_token}
+  min_hierarchies: ${min_hierarchies}
   feature_to_model_input_map:
     sequence_data: input_ids
     user_id: user_id
@@ -335,4 +351,3 @@ eval:
       recall:
         _target_: src.components.eval_metrics.Recall
         _partial_: true
-

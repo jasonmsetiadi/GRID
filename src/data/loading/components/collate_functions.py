@@ -31,6 +31,7 @@ def collate_with_sid_causal_duplicate(
         int
     ] = None,  # If oov_token is passed, we remove it from the sequence
     max_batch_size: int = 128,
+    separator_token: Optional[int] = None,
 ) -> Tuple[SequentialModelInputData, SequentialModuleLabelData]:
     """
         this collate fn is used to create the generate contiguous sequences as data augmentation to improve the performance.
@@ -63,6 +64,41 @@ def collate_with_sid_causal_duplicate(
 
     if isinstance(batch, list):
         batch = combine_list_of_tensor_dicts(batch)  # type: ignore
+
+    if separator_token is not None:
+        # Variable-length semantic IDs are delimited explicitly. Build
+        # contiguous item subsequences without assuming a fixed stride.
+        candidates = []
+        for row_index, sequence in enumerate(batch[sequence_field_name]):
+            separator_positions = torch.where(sequence == separator_token)[0].tolist()
+            item_start = 0
+            items = []
+            for separator_position in separator_positions:
+                items.append(sequence[item_start : separator_position + 1])
+                item_start = separator_position + 1
+            if len(items) >= 2:
+                for start_index in range(len(items) - 1):
+                    for end_index in range(start_index + 2, len(items) + 1):
+                        candidates.append((row_index, torch.cat(items[start_index:end_index])))
+
+        if len(candidates) > max_batch_size:
+            selected = torch.randperm(len(candidates))[:max_batch_size].tolist()
+            candidates = [candidates[index] for index in selected]
+
+        new_batch = {field_name: [] for field_name in batch}
+        for row_index, sequence in candidates:
+            new_batch[sequence_field_name].append(sequence)
+            for field_name in new_batch:
+                if field_name != sequence_field_name:
+                    new_batch[field_name].append(batch[field_name][row_index])
+        return collate_fn_train(
+            batch=new_batch,
+            labels=labels,
+            sequence_length=sequence_length,
+            masking_token=masking_token,
+            padding_token=padding_token,
+            oov_token=oov_token,
+        )
 
     # calculating the total number of contiguous sub-sequences in the batch
     total_num_seqs = torch.sum(

@@ -122,6 +122,8 @@ def map_sparse_id_to_semantic_id(
     dataset_config: SemanticIDDatasetConfig,
     features_to_apply: Optional[List[str]] = [],
     num_hierarchies: Optional[int] = None,
+    semantic_id_mode: str = "fixed",
+    separator_token: Optional[int] = None,
     **kwargs,
 ) -> Dict[str, torch.Tensor]:
     """
@@ -136,8 +138,41 @@ def map_sparse_id_to_semantic_id(
             # where N is the number of unique items in the dataset
             # and D is the number of hierarchies (semantic id digits)
             if id_map is not None:
+                lengths = None
+                if isinstance(id_map, dict):
+                    lengths = id_map.get("lengths")
+                    id_map = id_map["semantic_ids"]
                 # flatten the semantic id sequence
-                if num_hierarchies is None:
+                if semantic_id_mode == "variable" and lengths is not None:
+                    mapped_rows = []
+                    for sparse_id in v.reshape(-1).tolist():
+                        item_ids = id_map[sparse_id].reshape(-1)
+                        item_length = int(lengths[sparse_id])
+                        item_ids = item_ids[:item_length]
+                        if separator_token is not None:
+                            item_ids = torch.cat(
+                                [
+                                    item_ids,
+                                    item_ids.new_tensor([separator_token]),
+                                ]
+                            )
+                        mapped_rows.append(item_ids)
+                    row[k] = (
+                        torch.cat(mapped_rows)
+                        if mapped_rows
+                        else v.new_empty((0,), dtype=torch.long)
+                    )
+                elif separator_token is not None:
+                    mapped_ids = (
+                        id_map.t()[v].view(v.numel(), -1)
+                        if num_hierarchies is None
+                        else id_map[:num_hierarchies].t()[v].view(v.numel(), -1)
+                    )
+                    separator = mapped_ids.new_tensor([separator_token])
+                    row[k] = torch.cat(
+                        [torch.cat([item, separator]) for item in mapped_ids]
+                    )
+                elif num_hierarchies is None:
                     row[k] = id_map.t()[v].view(-1)
                 else:
                     assert num_hierarchies <= id_map.size(
