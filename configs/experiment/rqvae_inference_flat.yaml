@@ -9,6 +9,7 @@ seed: 42
 semantic_id_mode: fixed
 residual_threshold: 0.05
 min_hierarchies: 1
+token_budget_path: null
 
 
 model:
@@ -16,6 +17,7 @@ model:
   semantic_id_mode: ${semantic_id_mode}
   residual_threshold: ${residual_threshold}
   min_hierarchies: ${min_hierarchies}
+  token_budget_path: ${token_budget_path}
   track_residuals: true
   verbose: true
   train_layer_wise: false

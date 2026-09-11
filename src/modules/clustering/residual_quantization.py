@@ -37,6 +37,7 @@ class ResidualQuantization(LightningModule):
         semantic_id_mode: str = "fixed",
         residual_threshold: float = 0.0,
         min_hierarchies: int = 1,
+        token_budget_path: Optional[str] = None,
         **kwargs,
     ) -> None:
         """
@@ -113,6 +114,15 @@ class ResidualQuantization(LightningModule):
         self.semantic_id_mode = semantic_id_mode
         self.residual_threshold = residual_threshold
         self.min_hierarchies = min_hierarchies
+        self.token_budget = (
+            torch.load(token_budget_path, map_location="cpu")
+            if token_budget_path
+            else None
+        )
+        if self.token_budget is not None:
+            if not isinstance(self.token_budget, torch.Tensor):
+                raise TypeError("token_budget_path must contain a tensor.")
+            self.token_budget = self.token_budget.long()
 
         self.quantization_loss_weight = quantization_loss_weight
         self.reconstruction_loss_function = reconstruction_loss_function
@@ -819,6 +829,10 @@ class ResidualQuantization(LightningModule):
         ]
 
         if self.semantic_id_mode == "variable":
+            if self.token_budget is not None:
+                item_id_tensor = torch.as_tensor(item_ids, dtype=torch.long)
+                item_budgets = self.token_budget[item_id_tensor].to(lengths.device)
+                lengths = torch.minimum(lengths, item_budgets)
             predictions = [
                 item_ids_tensor[:length].tolist()
                 for item_ids_tensor, length in zip(cluster_ids, lengths.tolist())
