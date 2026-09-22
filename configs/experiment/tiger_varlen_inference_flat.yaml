@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - tiger_inference_flat
+  - _self_
+
+model:
+  variable_length: true
+  should_add_sep_token: false

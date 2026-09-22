@@ -1,0 +1,49 @@
+# @package _global_
+defaults:
+  - tiger_train_flat
+  - _self_
+
+model:
+  variable_length: true
+  should_add_sep_token: false
+
+data_loading:
+  train_dataloader_config:
+    dataloader:
+      labels:
+        sequence_data:
+          transform:
+            _target_: src.data.loading.components.label_function.NextVariableLengthTokenMasking
+            max_length: ${model.num_hierarchies}
+      collate_fn:
+        _target_: src.data.loading.components.collate_functions.collate_fn_train
+        _partial_: true
+        sequence_length: ${data_loading.train_dataloader_config.dataloader.sequence_length}
+        padding_token: ${data_loading.train_dataloader_config.dataloader.padding_token}
+        variable_length_position_field: sequence_data_position_ids
+  val_dataloader_config:
+    dataloader:
+      labels:
+        sequence_data:
+          transform:
+            _target_: src.data.loading.components.label_function.NextVariableLengthTokenMasking
+            max_length: ${model.num_hierarchies}
+      collate_fn:
+        _target_: src.data.loading.components.collate_functions.collate_fn_train
+        _partial_: true
+        sequence_length: ${data_loading.val_dataloader_config.dataloader.sequence_length}
+        padding_token: ${data_loading.val_dataloader_config.dataloader.padding_token}
+        variable_length_position_field: sequence_data_position_ids
+  test_dataloader_config:
+    dataloader:
+      labels:
+        sequence_data:
+          transform:
+            _target_: src.data.loading.components.label_function.NextVariableLengthTokenMasking
+            max_length: ${model.num_hierarchies}
+      collate_fn:
+        _target_: src.data.loading.components.collate_functions.collate_fn_train
+        _partial_: true
+        sequence_length: ${data_loading.test_dataloader_config.dataloader.sequence_length}
+        padding_token: ${data_loading.test_dataloader_config.dataloader.padding_token}
+        variable_length_position_field: sequence_data_position_ids

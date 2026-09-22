@@ -194,3 +194,60 @@ class NextKTokenMasking(LabelFunction):
             labels=labels,
             label_location=label_location,
         )
+
+
+class NextVariableLengthTokenMasking(LabelFunction):
+    """Mask the final item SID using per-item position IDs."""
+
+    def __init__(
+        self,
+        position_sequence_key: str = "sequence_data_position_ids",
+        max_length: Optional[int] = None,
+    ):
+        self.position_sequence_key = position_sequence_key
+        self.max_length = max_length
+
+    def transform_label(
+        self,
+        sequence: torch.Tensor,
+        padding_token: int,
+        masking_token: int,
+        position_sequence: Optional[torch.Tensor] = None,
+    ) -> LabelFunctionOutput:
+        if position_sequence is None:
+            raise ValueError("position_sequence is required for variable-length masking")
+
+        label_width = self.max_length or sequence.size(1)
+        labels = torch.full(
+            (sequence.size(0), label_width),
+            padding_token,
+            dtype=sequence.dtype,
+            device=sequence.device,
+        )
+        label_attention = torch.zeros_like(labels)
+        masked_sequence = sequence.clone()
+        label_locations = []
+
+        for row in range(sequence.size(0)):
+            valid = position_sequence[row] >= 0
+            starts = torch.where(valid & (position_sequence[row] == 0))[0]
+            if starts.numel() == 0:
+                raise ValueError("Each sequence must contain at least one SID")
+            start = int(starts[-1].item())
+            end = int(valid.nonzero()[-1].item()) + 1
+            target = sequence[row, start:end]
+            target = target[:label_width]
+            labels[row, : target.numel()] = target
+            label_attention[row, : target.numel()] = 1
+            masked_sequence[row, start:end] = padding_token
+            masked_sequence[row, start] = masking_token
+            label_locations.append([row, start])
+
+        return LabelFunctionOutput(
+            sequence=masked_sequence,
+            labels=labels,
+            label_location=torch.tensor(
+                label_locations, device=sequence.device, dtype=torch.long
+            ),
+            attention_mask=label_attention,
+        )

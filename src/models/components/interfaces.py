@@ -14,12 +14,18 @@ class ModelOutput:
         """
         raise NotImplementedError
 
-    def _convert_to_list(self, prediction: Union[torch.Tensor, List]) -> List:
+    def _convert_to_list(self, prediction: Union[torch.Tensor, List, Dict]) -> List:
         """
         Convert the prediction to a list so it can be serialized.
         """
         if isinstance(prediction, torch.Tensor):
             return prediction.detach().cpu().tolist()
+
+        if isinstance(prediction, dict):
+            return {
+                key: self._convert_to_list(value)
+                for key, value in prediction.items()
+            }
 
         return prediction
 
@@ -84,10 +90,14 @@ class OneKeyPerPredictionOutput(ModelOutput):
 
     @property
     def list_of_row_format(self):
+        keys = self._convert_to_list(self.keys)
+        predictions = self._convert_to_list(self.predictions)
+        if isinstance(predictions, dict):
+            predictions = [
+                {name: values[index] for name, values in predictions.items()}
+                for index in range(len(keys))
+            ]
         return [
             {self.key_name: key, self.prediction_name: pred}
-            for key, pred in zip(
-                self._convert_to_list(self.keys),
-                self._convert_to_list(self.predictions),
-            )
+            for key, pred in zip(keys, predictions)
         ]

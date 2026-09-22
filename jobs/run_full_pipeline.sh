@@ -17,11 +17,17 @@ cd GRID
 # Defaults are provided for local/manual runs.
 DATASET=${DATASET:-beauty}
 SID_METHOD=${SID_METHOD:-rkmeans}       # options: rkmeans, rvq, rqvae
+VARIABLE_LENGTH_SID=${VARIABLE_LENGTH_SID:-false}
+RESIDUAL_THRESHOLD=${RESIDUAL_THRESHOLD:-0.1}
 
 EMBEDDING_DIM=2048
 SID_HIERARCHIES=3
 TIGER_HIERARCHIES=4
 CODEBOOK_WIDTH=256
+
+if [[ "${VARIABLE_LENGTH_SID}" == "true" ]]; then
+    TIGER_HIERARCHIES=${SID_HIERARCHIES}
+fi
 
 # Helper to print elapsed time in HH:MM:SS given a start timestamp (seconds since epoch).
 log_duration() {
@@ -78,6 +84,9 @@ python -m src.inference experiment=${SID_METHOD}_inference_flat \
     num_hierarchies=${SID_HIERARCHIES} \
     codebook_width=${CODEBOOK_WIDTH} \
     ckpt_path=${SID_CKPT} \
+    model.variable_length=${VARIABLE_LENGTH_SID} \
+    model.residual_threshold=${RESIDUAL_THRESHOLD} \
+    model.max_sid_length=${SID_HIERARCHIES} \
     paths.log_dir=logs/${DATASET}/${SID_METHOD}
 
 # Locate the latest generated semantic IDs from Step 3b under this method's log dir.
@@ -90,7 +99,14 @@ log_duration ${STEP_START} "Step 3b"
 # -----------------------------------------------------------------------------
 STEP_START=$(date +%s)
 echo "Running Step 4 (train): Train generative recommendation model"
-python -m src.train experiment=tiger_train_flat \
+TIGER_EXPERIMENT=tiger_train_flat
+TIGER_INFERENCE_EXPERIMENT=tiger_inference_flat
+if [[ "${VARIABLE_LENGTH_SID}" == "true" ]]; then
+    TIGER_EXPERIMENT=tiger_varlen_train_flat
+    TIGER_INFERENCE_EXPERIMENT=tiger_varlen_inference_flat
+fi
+
+python -m src.train experiment=${TIGER_EXPERIMENT} \
     data_dir=data/amazon_data/${DATASET} \
     semantic_id_path=${SEMANTIC_ID_PATH} \
     num_hierarchies=${TIGER_HIERARCHIES} \
@@ -106,7 +122,7 @@ log_duration ${STEP_START} "Step 4 (train)"
 # -----------------------------------------------------------------------------
 STEP_START=$(date +%s)
 echo "Running Step 4 (inference): Generate recommendations"
-python -m src.inference experiment=tiger_inference_flat \
+python -m src.inference experiment=${TIGER_INFERENCE_EXPERIMENT} \
     data_dir=data/amazon_data/${DATASET} \
     semantic_id_path=${SEMANTIC_ID_PATH} \
     ckpt_path=${TIGER_CKPT} \

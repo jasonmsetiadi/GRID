@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
@@ -110,7 +111,7 @@ def filter_sequence_length_row(row: Dict[str, torch.Tensor], dataset_config: Bas
 
 def filter_empty_feature(row: Dict[str, torch.Tensor], dataset_config: BaseDatasetConfig, features_to_apply: Optional[List[str]] = [], **kwargs) -> Dict[str, np.ndarray]:  # type: ignore
     # Only works for a row right now. This filters out rows that have fields with empty tensors.
-    for k, v in row.items():
+    for k, v in list(row.items()):
         if is_feature_in_features_to_apply(features_to_apply, k):
             if len(v) == 0:
                 return None
@@ -129,13 +130,40 @@ def map_sparse_id_to_semantic_id(
     based on the id_map in the dataset config.
     """
 
-    for k, v in row.items():
+    for k, v in list(row.items()):
         if is_feature_in_features_to_apply(features_to_apply, k):
-            id_map: torch.Tensor = dataset_config.semantic_id_map.get(k, None)
+            id_map = dataset_config.semantic_id_map.get(k, None)
             # id_map is a D x N tensor
             # where N is the number of unique items in the dataset
             # and D is the number of hierarchies (semantic id digits)
             if id_map is not None:
+                if isinstance(id_map, Mapping):
+                    codes = id_map.get("codes")
+                    lengths = id_map.get("lengths")
+                    if codes is None or lengths is None:
+                        raise ValueError(
+                            f"Variable-length semantic ID map for {k} must contain codes and lengths"
+                        )
+                    codes = torch.as_tensor(codes)
+                    lengths = torch.as_tensor(lengths).long()
+                    item_ids = torch.as_tensor(v).long().flatten()
+                    flattened = []
+                    position_ids = []
+                    for item_id in item_ids:
+                        length = int(lengths[item_id].item())
+                        flattened.append(codes[item_id, :length].long())
+                        position_ids.append(torch.arange(length, dtype=torch.long))
+                    row[k] = (
+                        torch.cat(flattened)
+                        if flattened
+                        else torch.empty(0, dtype=torch.long)
+                    )
+                    row[f"{k}_position_ids"] = (
+                        torch.cat(position_ids)
+                        if position_ids
+                        else torch.empty(0, dtype=torch.long)
+                    )
+                    continue
                 # flatten the semantic id sequence
                 if num_hierarchies is None:
                     row[k] = id_map.t()[v].view(-1)

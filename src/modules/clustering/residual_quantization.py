@@ -12,6 +12,7 @@ from torchmetrics import MeanMetric
 from src.data.loading.components.interfaces import ItemData
 from src.models.components.interfaces import OneKeyPerPredictionOutput
 from src.models.modules.clustering.base_clustering_module import BaseClusteringModule
+from src.utils.variable_length import select_lengths_from_residuals
 
 
 class ResidualQuantization(LightningModule):
@@ -34,6 +35,10 @@ class ResidualQuantization(LightningModule):
         train_layer_wise: bool = False,
         track_residuals: bool = False,
         verbose: bool = False,
+        variable_length: bool = False,
+        residual_threshold: Optional[float] = None,
+        min_sid_length: int = 1,
+        max_sid_length: Optional[int] = None,
         **kwargs,
     ) -> None:
         """
@@ -97,6 +102,10 @@ class ResidualQuantization(LightningModule):
             self.automatic_optimization = False
         self.train_layer_wise = train_layer_wise
         self.normalize_residuals = normalize_residuals
+        self.variable_length = variable_length
+        self.residual_threshold = residual_threshold
+        self.min_sid_length = min_sid_length
+        self.max_sid_length = max_sid_length
 
         self.quantization_loss_weight = quantization_loss_weight
         self.reconstruction_loss_function = reconstruction_loss_function
@@ -727,16 +736,40 @@ class ResidualQuantization(LightningModule):
             model_output: A OneKeyPerPredictionOutput object containing the item
                 ids as keys and the cluster ids as predictions.
         """
-        cluster_ids, _, _, _ = self.model_step(batch)
+        cluster_ids, all_residuals, _, _ = self.model_step(batch)
 
         item_ids = [
             item_id.item() if isinstance(item_id, torch.Tensor) else item_id
             for item_id in batch.item_ids
         ]
 
+        if self.variable_length:
+            if all_residuals is None:
+                raise RuntimeError(
+                    "Variable-length SID generation requires track_residuals=True"
+                )
+            if self.residual_threshold is None:
+                raise ValueError(
+                    "residual_threshold must be set when variable_length=True"
+                )
+            lengths = select_lengths_from_residuals(
+                residuals=all_residuals,
+                threshold=self.residual_threshold,
+                min_length=self.min_sid_length,
+                max_length=self.max_sid_length,
+            )
+            predictions = {
+                "codes": cluster_ids,
+                "lengths": lengths,
+                "residual_norms": torch.linalg.vector_norm(all_residuals, dim=1),
+                "item_ids": torch.as_tensor(item_ids, device=cluster_ids.device),
+            }
+        else:
+            predictions = cluster_ids
+
         model_output = OneKeyPerPredictionOutput(
             keys=item_ids,
-            predictions=cluster_ids,
+            predictions=predictions,
             key_name="item_id",
             prediction_name="cluster_ids",
         )

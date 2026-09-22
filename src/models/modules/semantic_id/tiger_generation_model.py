@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Mapping
 from typing import Any, Optional, Tuple, Union
 
 import torch
@@ -165,6 +166,7 @@ class SemanticIDGenerativeRecommender(TransformerBaseModule):
         codebook_size: int,
         num_hierarchies: int,
         attention_mask: Optional[torch.Tensor] = None,
+        sid_position_ids: Optional[torch.Tensor] = None,
     ):
         """Adds repeating offsets to each element in each row of input_sids.
         we use a single embedding table for multiple code books.
@@ -181,17 +183,17 @@ class SemanticIDGenerativeRecommender(TransformerBaseModule):
             raise ValueError("Input tensor must be 2-dimensional.")
 
         num_rows, num_cols = input_sids.shape
-        offsets = (
-            torch.arange(num_hierarchies, device=input_sids.device) * codebook_size
-        )
-
-        # Calculate how many times the full offset pattern needs to repeat
-        num_repeats = (
-            num_cols + num_hierarchies - 1
-        ) // num_hierarchies  # Integer division to handle cases where num_cols is not a multiple of num_hierarchies
-
-        # Repeat the offsets and slice to match the number of columns
-        repeated_offsets = offsets.repeat(num_repeats)[:num_cols]
+        if sid_position_ids is None:
+            offsets = (
+                torch.arange(num_hierarchies, device=input_sids.device)
+                * codebook_size
+            )
+            num_repeats = (num_cols + num_hierarchies - 1) // num_hierarchies
+            repeated_offsets = offsets.repeat(num_repeats)[:num_cols]
+        else:
+            if sid_position_ids.shape != input_sids.shape:
+                raise ValueError("sid_position_ids must match input_sids shape")
+            repeated_offsets = sid_position_ids.clamp(min=0) * codebook_size
 
         # Add the repeated offsets to each row using broadcasting
         input_sids_with_offsets = input_sids + repeated_offsets
@@ -249,6 +251,15 @@ class SemanticIDGenerativeRecommender(TransformerBaseModule):
 
         # Concatenate the results from all batches.
         return torch.cat(results)
+
+    def _build_variable_sid_index(self, sequences):
+        self.variable_sid_sequences = [tuple(int(token) for token in sequence) for sequence in sequences]
+        self.variable_sid_terminals = set(self.variable_sid_sequences)
+        self.variable_sid_children = {}
+        for sequence in self.variable_sid_sequences:
+            for position in range(len(sequence)):
+                prefix = sequence[:position]
+                self.variable_sid_children.setdefault(prefix, set()).add(sequence[position])
 
     def _beam_search_one_step(
         self,
@@ -475,6 +486,7 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
         mlp_layers: Optional[int] = None,
         should_check_prefix: bool = False,
         should_add_sep_token: bool = True,
+        variable_length: bool = False,
         prediction_key_name: str = "user_id",
         prediction_value_name: str = "semantic_ids",
         **kwargs,
@@ -492,6 +504,20 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
         embedding_dim (Optional[int]): the dimension of the embeddings.
         should_check_prefix (bool): whether to check if the prefix is valid.
         """
+
+        variable_sid_sequences = None
+        variable_sid_item_ids = None
+        if isinstance(codebooks, Mapping):
+            codes = torch.as_tensor(codebooks["codes"])
+            lengths = torch.as_tensor(codebooks["lengths"]).long()
+            variable_sid_item_ids = torch.as_tensor(
+                codebooks.get("item_ids", torch.arange(codes.size(0)))
+            ).long()
+            variable_sid_sequences = [
+                codes[index, : int(length)].tolist()
+                for index, length in enumerate(lengths)
+            ]
+            codebooks = codes.t()
 
         if num_hierarchies is None or num_embeddings_per_hierarchy is None:
             num_hierarchies, num_embeddings_per_hierarchy = (
@@ -515,6 +541,15 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
             should_check_prefix=should_check_prefix,
             **kwargs,
         )
+
+        self.variable_length = variable_length
+        if variable_sid_sequences is not None:
+            self._build_variable_sid_index(variable_sid_sequences)
+            self.variable_sid_item_ids = {}
+            for item_id, sequence in zip(variable_sid_item_ids, variable_sid_sequences):
+                self.variable_sid_item_ids.setdefault(tuple(sequence), []).append(
+                    int(item_id)
+                )
 
         self.encoder = SemanticIDEncoderModule(
             encoder=self.encoder,
@@ -586,6 +621,7 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
         attention_mask: torch.Tensor,
         input_ids: torch.Tensor,
         user_id: torch.Tensor,
+        sid_position_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Forward pass for the encoder module.
@@ -603,12 +639,13 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
             codebook_size=self.num_embeddings_per_hierarchy,
             num_hierarchies=self.num_hierarchies,
             attention_mask=attention_mask,
+            sid_position_ids=sid_position_ids,
         )
         inputs_embeds_for_encoder = self.get_embedding_table(table_name="encoder")(
             shifted_sids
         )
 
-        if self.sep_token is not None:
+        if self.sep_token is not None and sid_position_ids is None:
             (
                 inputs_embeds_for_encoder,
                 attention_mask,
@@ -668,6 +705,7 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
         attention_mask_for_encoder: Optional[torch.Tensor] = None,
         use_cache: bool = False,
         past_key_values: Optional[DynamicCache] = None,
+        sid_position_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Forward pass for the decoder module.
@@ -689,6 +727,7 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
                 attention_mask=torch.ones_like(future_ids, device=future_ids.device)
                 if attention_mask is None
                 else attention_mask,
+                sid_position_ids=sid_position_ids,
             )
             inputs_embeds_for_decoder = self.get_embedding_table(table_name="decoder")(
                 shifted_future_sids
@@ -740,6 +779,7 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
         attention_mask: torch.Tensor,
         input_ids: torch.Tensor,
         user_id: torch.Tensor = None,
+        sid_position_ids: torch.Tensor = None,
     ) -> torch.Tensor:
         """
         Generate the semantic id given the current model in the sequence using beam search.
@@ -749,6 +789,14 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
             user_id (torch.Tensor): The user IDs for the encoder.
         """
 
+        if self.variable_length:
+            return self._generate_variable_length(
+                attention_mask=attention_mask,
+                input_ids=input_ids,
+                user_id=user_id,
+                sid_position_ids=sid_position_ids,
+            )
+
         # getting encoder output
         # we only need to do this once because we have decoder
         # to do auto-regressive generation
@@ -756,6 +804,7 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
             attention_mask=attention_mask,
             input_ids=input_ids,
             user_id=user_id,
+            sid_position_ids=sid_position_ids,
         )
 
         # initilize cached generated ids to None
@@ -826,6 +875,74 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
 
         return generated_ids, marginal_log_prob
 
+    @torch.no_grad()
+    def _generate_variable_length(
+        self,
+        attention_mask: torch.Tensor,
+        input_ids: torch.Tensor,
+        user_id: torch.Tensor = None,
+        sid_position_ids: torch.Tensor = None,
+    ):
+        """Generate terminal variable-length SID prefixes with beam search."""
+        encoder_output, encoder_attention_mask = self.encoder_forward_pass(
+            attention_mask=attention_mask,
+            input_ids=input_ids,
+            user_id=user_id,
+            sid_position_ids=sid_position_ids,
+        )
+
+        results = []
+        beam_width = self.top_k_for_generation
+        for batch_index in range(input_ids.size(0)):
+            active = [(tuple(), 0.0)]
+            finished = []
+            for position in range(self.num_hierarchies):
+                candidates = []
+                for prefix, score in active:
+                    allowed = self.variable_sid_children.get(prefix, set())
+                    if not allowed:
+                        continue
+                    prefix_tensor = torch.tensor(
+                        [prefix], dtype=input_ids.dtype, device=input_ids.device
+                    )
+                    decoder_output = self.decoder_forward_pass(
+                        future_ids=prefix_tensor if prefix else None,
+                        encoder_output=encoder_output[batch_index : batch_index + 1],
+                        attention_mask_for_encoder=encoder_attention_mask[
+                            batch_index : batch_index + 1
+                        ],
+                        use_cache=False,
+                    )
+                    logits = self.decoder.decoder_mlp[position](
+                        decoder_output[:, -1, :]
+                    ).squeeze(0)
+                    allowed_indices = torch.tensor(
+                        sorted(allowed), dtype=torch.long, device=logits.device
+                    )
+                    allowed_scores = torch.log_softmax(logits[allowed_indices], dim=-1)
+                    count = min(beam_width, allowed_indices.numel())
+                    values, indices = torch.topk(allowed_scores, k=count)
+                    for value, index in zip(values.tolist(), indices.tolist()):
+                        token = int(allowed_indices[index].item())
+                        candidate = prefix + (token,)
+                        candidate_score = score + float(value)
+                        candidates.append((candidate, candidate_score))
+
+                candidates.sort(key=lambda item: item[1], reverse=True)
+                active = candidates[:beam_width]
+                for candidate in active:
+                    if candidate[0] in self.variable_sid_terminals:
+                        finished.append(candidate)
+                if not active:
+                    break
+
+            if finished:
+                finished.sort(key=lambda item: item[1], reverse=True)
+                results.append([list(prefix) for prefix, _ in finished[:beam_width]])
+            else:
+                results.append([list(prefix) for prefix, _ in active[:beam_width]])
+        return results
+
     def forward(
         self,
         attention_mask_encoder: torch.Tensor,
@@ -833,6 +950,7 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
         user_id: Optional[torch.Tensor] = None,
         future_ids: Optional[torch.Tensor] = None,
         attention_mask_decoder: Optional[torch.Tensor] = None,
+        sid_position_ids: Optional[torch.Tensor] = None,
         **kwargs: Any,
     ) -> torch.Tensor:
         """
@@ -849,6 +967,7 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
             attention_mask=attention_mask_encoder,
             input_ids=input_ids,
             user_id=user_id,
+            sid_position_ids=sid_position_ids,
         )
 
         decoder_output = self.decoder_forward_pass(
@@ -885,6 +1004,14 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
 
     def predict_step(self, batch: SequentialModelInputData):
         generated_sids, _ = self.model_step(batch)
+        if self.variable_length:
+            generated_sids = [
+                [
+                    self.variable_sid_item_ids.get(tuple(sequence), [])
+                    for sequence in user_predictions
+                ]
+                for user_predictions in generated_sids
+            ]
         ids = [
             id.item() if isinstance(id, torch.Tensor) else id
             for id in batch.user_id_list
@@ -923,14 +1050,19 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
             return generated_ids, 0  # returning 0 here because we don't have a loss
 
         fut_ids = None
+        future_attention_mask = None
         for label in label_data.labels:
             curr_label = label_data.labels[label]
-            fut_ids = curr_label.reshape(model_input.mask.size(0), -1)
+            fut_ids = curr_label if self.variable_length else curr_label.reshape(
+                model_input.mask.size(0), -1
+            )
+            future_attention_mask = label_data.attention_mask.get(label)
         # here we pass labels in to the forward function
         # because the decoder is causal and we are doing shifted prediction
         model_output = self.forward(
             attention_mask_encoder=model_input.mask,
             future_ids=fut_ids,
+            attention_mask_decoder=future_attention_mask,
             **{
                 self.feature_to_model_input_map.get(k, k): v
                 for k, v in model_input.transformed_sequences.items()
@@ -940,6 +1072,18 @@ class SemanticIDEncoderDecoder(SemanticIDGenerativeRecommender):
         # we prepended a bos token to the decoder input
         # so we need to remove the last token in the output
         model_output = model_output[:, :-1]
+
+        if self.variable_length:
+            loss = 0
+            valid = future_attention_mask.bool()
+            for position in range(fut_ids.size(1)):
+                logits = self.decoder.decoder_mlp[position](model_output[:, position])
+                if valid[:, position].any():
+                    loss += self.loss_function(
+                        input=logits[valid[:, position]],
+                        target=fut_ids[valid[:, position], position].long(),
+                    )
+            return model_output, loss
 
         # the label locations is shared for all semantic id hierarchies
         loss = 0

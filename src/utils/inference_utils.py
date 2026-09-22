@@ -269,15 +269,47 @@ class LocalPickleWriter(BaseBufferedWriter):
         log.info(f"Merged {len(merged_data)} rows into merged_predictions.pkl.")
 
         if self.should_merge_list_of_keyed_tensors_to_single_tensor:
-            merged_data_tensor = merge_list_of_keyed_tensors_to_single_tensor(
-                data=merged_data,
-                index_key=self.prediction_key_name,
-                value_key=self.prediction_name,
-            )
+            prediction = merged_data[0][self.prediction_name]
+            if isinstance(prediction, dict):
+                # Variable-length predictions contain independently shaped fields
+                # such as padded codes, lengths, and residual diagnostics.
+                merged_data_tensor = {}
+                for field_name in prediction:
+                    field_data = [
+                        {
+                            self.prediction_key_name: row[self.prediction_key_name],
+                            field_name: row[self.prediction_name][field_name],
+                        }
+                        for row in merged_data
+                    ]
+                    merged_data_tensor[field_name] = merge_list_of_keyed_tensors_to_single_tensor(
+                        data=field_data,
+                        index_key=self.prediction_key_name,
+                        value_key=field_name,
+                    )
+            elif isinstance(prediction, torch.Tensor):
+                merged_data_tensor = merge_list_of_keyed_tensors_to_single_tensor(
+                    data=merged_data,
+                    index_key=self.prediction_key_name,
+                    value_key=self.prediction_name,
+                )
+            else:
+                merged_data_tensor = [None] * len(merged_data)
+                for row in merged_data:
+                    merged_data_tensor[row[self.prediction_key_name]] = row[
+                        self.prediction_name
+                    ]
+            if isinstance(merged_data_tensor, dict):
+                merged_data_tensor = {
+                    key: value.cpu() if isinstance(value, torch.Tensor) else value
+                    for key, value in merged_data_tensor.items()
+                }
+            elif isinstance(merged_data_tensor, torch.Tensor):
+                merged_data_tensor = merged_data_tensor.cpu()
             torch.save(
-                merged_data_tensor.cpu(),
+                merged_data_tensor,
                 os.path.join(self.output_dir, "merged_predictions_tensor.pt"),
             )
         log.info(
-            f"Merged {len(merged_data_tensor)} rows into merged_predictions_tensor.pt. as pytorch tensor"
+            f"Merged {len(merged_data)} rows into merged_predictions_tensor.pt. as pytorch tensor"
         )
