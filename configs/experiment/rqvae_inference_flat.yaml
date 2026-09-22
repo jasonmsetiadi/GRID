@@ -14,6 +14,9 @@ model:
   residual_threshold: null
   min_sid_length: 1
   max_sid_length: ${num_hierarchies}
+  length_selection_mode: content_based
+  length_selection_method: residual_threshold
+  item_lengths_path: null
   track_residuals: true
   verbose: true
   train_layer_wise: false

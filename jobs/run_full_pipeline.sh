@@ -19,11 +19,32 @@ DATASET=${DATASET:-beauty}
 SID_METHOD=${SID_METHOD:-rkmeans}       # options: rkmeans, rvq, rqvae
 VARIABLE_LENGTH_SID=${VARIABLE_LENGTH_SID:-false}
 RESIDUAL_THRESHOLD=${RESIDUAL_THRESHOLD:-0.1}
+MIN_SID_LENGTH=${MIN_SID_LENGTH:-1}
+LENGTH_SELECTION_MODE=${LENGTH_SELECTION_MODE:-content_based}
+LENGTH_SELECTION_METHOD=${LENGTH_SELECTION_METHOD:-residual_threshold}
+ITEM_LENGTHS_PATH=${ITEM_LENGTHS_PATH:-}
+LENGTH_DIRECTION=${LENGTH_DIRECTION:-direct}
+
+if [[ "${LENGTH_SELECTION_MODE}" == "per_item" ]]; then
+    VARIABLE_LENGTH_SID=true
+fi
 
 EMBEDDING_DIM=2048
-SID_HIERARCHIES=3
-TIGER_HIERARCHIES=4
+SID_HIERARCHIES=${SID_HIERARCHIES:-3}
+TIGER_HIERARCHIES=${TIGER_HIERARCHIES:-4}
 CODEBOOK_WIDTH=256
+
+if [[ "${LENGTH_SELECTION_MODE}" == "per_item" ]]; then
+    ITEM_LENGTHS_PATH="logs/${DATASET}/${SID_METHOD}/item_lengths_${LENGTH_SELECTION_METHOD}_${LENGTH_DIRECTION}.pt"
+    mkdir -p "$(dirname "${ITEM_LENGTHS_PATH}")"
+    python -m src.utils.item_length_generation \
+        --data-dir=data/amazon_data/${DATASET} \
+        --method=${LENGTH_SELECTION_METHOD} \
+        --min-length=${MIN_SID_LENGTH} \
+        --max-length=${SID_HIERARCHIES} \
+        --direction=${LENGTH_DIRECTION} \
+        --output-path="${ITEM_LENGTHS_PATH}"
+fi
 
 if [[ "${VARIABLE_LENGTH_SID}" == "true" ]]; then
     TIGER_HIERARCHIES=${SID_HIERARCHIES}
@@ -86,7 +107,11 @@ python -m src.inference experiment=${SID_METHOD}_inference_flat \
     ckpt_path=${SID_CKPT} \
     model.variable_length=${VARIABLE_LENGTH_SID} \
     model.residual_threshold=${RESIDUAL_THRESHOLD} \
+    model.min_sid_length=${MIN_SID_LENGTH} \
     model.max_sid_length=${SID_HIERARCHIES} \
+    model.length_selection_mode=${LENGTH_SELECTION_MODE} \
+    model.length_selection_method=${LENGTH_SELECTION_METHOD} \
+    model.item_lengths_path=${ITEM_LENGTHS_PATH:-null} \
     paths.log_dir=logs/${DATASET}/${SID_METHOD}
 
 # Locate the latest generated semantic IDs from Step 3b under this method's log dir.

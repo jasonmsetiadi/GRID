@@ -12,7 +12,7 @@ from torchmetrics import MeanMetric
 from src.data.loading.components.interfaces import ItemData
 from src.models.components.interfaces import OneKeyPerPredictionOutput
 from src.models.modules.clustering.base_clustering_module import BaseClusteringModule
-from src.utils.variable_length import select_lengths_from_residuals
+from src.utils.variable_length import select_lengths
 
 
 class ResidualQuantization(LightningModule):
@@ -39,6 +39,9 @@ class ResidualQuantization(LightningModule):
         residual_threshold: Optional[float] = None,
         min_sid_length: int = 1,
         max_sid_length: Optional[int] = None,
+        length_selection_mode: str = "content_based",
+        length_selection_method: str = "residual_threshold",
+        item_lengths_path: Optional[str] = None,
         **kwargs,
     ) -> None:
         """
@@ -106,6 +109,13 @@ class ResidualQuantization(LightningModule):
         self.residual_threshold = residual_threshold
         self.min_sid_length = min_sid_length
         self.max_sid_length = max_sid_length
+        self.length_selection_mode = length_selection_mode
+        self.length_selection_method = length_selection_method
+        self.item_lengths = (
+            torch.load(item_lengths_path, map_location="cpu")
+            if item_lengths_path is not None
+            else None
+        )
 
         self.quantization_loss_weight = quantization_loss_weight
         self.reconstruction_loss_function = reconstruction_loss_function
@@ -744,24 +754,34 @@ class ResidualQuantization(LightningModule):
         ]
 
         if self.variable_length:
-            if all_residuals is None:
+            if (
+                self.length_selection_mode == "content_based"
+                and all_residuals is None
+            ):
                 raise RuntimeError(
-                    "Variable-length SID generation requires track_residuals=True"
+                    "Content-based SID selection requires track_residuals=True"
                 )
-            if self.residual_threshold is None:
-                raise ValueError(
-                    "residual_threshold must be set when variable_length=True"
-                )
-            lengths = select_lengths_from_residuals(
+            lengths = select_lengths(
+                mode=self.length_selection_mode,
+                method=self.length_selection_method,
                 residuals=all_residuals,
+                item_ids=torch.as_tensor(item_ids),
+                item_lengths=self.item_lengths,
                 threshold=self.residual_threshold,
                 min_length=self.min_sid_length,
                 max_length=self.max_sid_length,
             )
+            residual_norms = (
+                torch.linalg.vector_norm(all_residuals, dim=1)
+                if all_residuals is not None
+                else torch.empty(
+                    (len(item_ids), 0), dtype=torch.float32, device=cluster_ids.device
+                )
+            )
             predictions = {
                 "codes": cluster_ids,
                 "lengths": lengths,
-                "residual_norms": torch.linalg.vector_norm(all_residuals, dim=1),
+                "residual_norms": residual_norms,
                 "item_ids": torch.as_tensor(item_ids, device=cluster_ids.device),
             }
         else:

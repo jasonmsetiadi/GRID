@@ -107,21 +107,16 @@ def merge_list_of_keyed_tensors_to_single_tensor(
         index_key (str): The key in the dictionary that contains the index for each row.
         value_key (str): The key in the dictionary that contains the tensor to be merged.
     """
-    batch_size = len(data)
+    output_size = max(int(row[index_key]) for row in data) + 1
     first_value = torch.as_tensor(data[0][value_key])
     dimensions = first_value.size()
     output_tensor = torch.zeros(
-        (batch_size, *dimensions), dtype=first_value.dtype
+        (output_size, *dimensions), dtype=first_value.dtype
     )
     for row in data:
-        index = row[index_key]
+        index = int(row[index_key])
         value = row[value_key]
-        if index < batch_size:
-            output_tensor[index] = torch.tensor(value)
-        else:
-            raise IndexError(
-                f"Index {index} out of bounds for batch size {batch_size}."
-            )
+        output_tensor[index] = torch.as_tensor(value, dtype=first_value.dtype)
     return output_tensor
 
 
