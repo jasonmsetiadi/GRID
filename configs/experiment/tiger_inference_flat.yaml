@@ -21,6 +21,7 @@ model:
   _target_: src.models.modules.semantic_id.tiger_generation_model.SemanticIDEncoderDecoder
   feature_to_model_input_map:
     sequence_data: input_ids
+    sequence_data_position_ids: sid_position_ids
     user_id: user_id
   postprocessor: null
   aggregator: null
@@ -48,6 +49,7 @@ model:
       num_embeddings: ${model.huggingface_model.config.vocab_size}
       embedding_dim: ${model.huggingface_model.config.d_model}
   num_hierarchies: ${num_hierarchies}
+  variable_length: false
   num_user_bins: null
   codebooks: ${data_loading.predict_dataloader_config.dataloader.dataset_config.semantic_id_map.sequence_data}
   mlp_layers: 2
@@ -218,4 +220,3 @@ extras:
   enforce_tags: true
   print_config_warnings: true
   print_config: true
-

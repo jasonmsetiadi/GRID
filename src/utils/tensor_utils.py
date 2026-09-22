@@ -108,8 +108,11 @@ def merge_list_of_keyed_tensors_to_single_tensor(
         value_key (str): The key in the dictionary that contains the tensor to be merged.
     """
     batch_size = len(data)
-    dimensions = torch.tensor(data[0][value_key]).size()
-    output_tensor = torch.zeros((batch_size, *dimensions))
+    first_value = torch.as_tensor(data[0][value_key])
+    dimensions = first_value.size()
+    output_tensor = torch.zeros(
+        (batch_size, *dimensions), dtype=first_value.dtype
+    )
     for row in data:
         index = row[index_key]
         value = row[value_key]
@@ -141,6 +144,10 @@ def deduplicate_rows_in_tensor(
     if not file_path.endswith(".pt"):
         return None
     data = torch.load(open_local_or_remote(file_path, mode="rb"))
+    if isinstance(data, dict):
+        # Structured variable-length SID artifacts already carry their lengths
+        # and must not be treated as rectangular tensors.
+        return data if return_tensor else None
     assert len(data.size()) == 2, "Input data must be a 2D PyTorch tensor."
 
     # Use torch.unique to get unique rows and their inverse indices
@@ -196,6 +203,8 @@ def transpose_tensor_from_file(
     if not file_path.endswith(".pt"):
         return None
     data = torch.load(open_local_or_remote(file_path, mode="rb"))
+    if isinstance(data, dict):
+        return data if return_tensor else None
 
     # Transpose the tensor
     result = data.transpose(dim1, dim2)

@@ -199,4 +199,5 @@ def pipeline_launcher(cfg: DictConfig):
         raise ex
     finally:
         # We add the try catch to make sure the loggers are finalized even if the task fails.
-        finalize_loggers(pipeline_modules.trainer)
+        if "pipeline_modules" in locals():
+            finalize_loggers(pipeline_modules.trainer)
